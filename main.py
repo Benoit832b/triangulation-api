@@ -127,16 +127,10 @@ def triangulate_ransac(origins, directions, threshold=0.3, iterations=100):
     return best_point, best_inliers
 
 
-# ---------------- ANGLE ----------------
-
-def angle_between(d1, d2):
-    return np.degrees(np.arccos(np.clip(np.dot(d1, d2), -1, 1)))
-
-
 # ---------------- DETECTION ----------------
 
 def detect_red_pipe(image_path):
-    img = cv2.imread(image_path)
+    img = cv2.imread(f"images/{image_path}")
 
     if img is None:
         print(f"❌ Image not found: {image_path}")
@@ -160,7 +154,7 @@ def detect_red_pipe(image_path):
                             maxLineGap=20)
 
     if lines is None:
-        print("❌ No lines detected")
+        print(f"❌ No lines: {image_path}")
         return None
 
     best_line = None
@@ -186,15 +180,15 @@ def detect_red_pipe(image_path):
             best_line = (x1, y1, x2, y2)
 
     if best_line is None:
-        print("❌ No valid pipe line")
+        print(f"❌ No valid pipe: {image_path}")
         return None
 
     x1, y1, x2, y2 = best_line
 
     cx = int((x1 + x2) / 2)
-    cy = int(max(y1, y2))  # 🔥 point bas
+    cy = int(max(y1, y2))  # point bas
 
-    print(f"✅ Detection OK: {cx}, {cy}")
+    print(f"✅ {image_path} → {cx},{cy}")
 
     return [cx, cy]
 
@@ -202,33 +196,30 @@ def detect_red_pipe(image_path):
 # ---------------- API ----------------
 
 @app.post("/triangulate")
-def triangulate(data: dict):
-    geo_data = read_geo_file()
+def triangulate():
+
+    geo_data, ordered_images = read_geo_file()
+
+    # 🔥 10 images consécutives
+    subset = ordered_images[0:10]
 
     origins = []
     directions = []
 
-    for obs in data["observations"]:
-        img = obs["image"]
-        print(f"\n📷 Processing: {img}")
+    for img in subset:
 
         if img not in geo_data:
-            print("❌ NOT IN GEO")
             continue
 
         cam = geo_data[img]
         C = cam["position"]
         yaw, pitch, roll = cam["orientation"]
 
-        if "pixel" in obs:
-            u, v = obs["pixel"]
-            print(f"🟡 Manual pixel: {u}, {v}")
-        else:
-            pixel = detect_red_pipe(img)
-            if pixel is None:
-                print("❌ Detection failed")
-                continue
-            u, v = pixel
+        pixel = detect_red_pipe(img)
+        if pixel is None:
+            continue
+
+        u, v = pixel
 
         R = euler_to_rotation(yaw, pitch, roll)
         ray = R @ pixel_to_ray(u, v)
@@ -236,19 +227,10 @@ def triangulate(data: dict):
         origins.append(C)
         directions.append(ray)
 
-    print(f"\n👉 VALID OBSERVATIONS: {len(origins)}")
+    print(f"\n👉 VALID OBS: {len(origins)}")
 
     if len(origins) < 2:
-        return {"error": f"Only {len(origins)} valid observations"}
-
-    # filtre angle
-    angles = []
-    for i in range(len(directions)):
-        for j in range(i+1, len(directions)):
-            angles.append(angle_between(directions[i], directions[j]))
-
-    if np.mean(angles) < 3:
-        return {"error": "Weak geometry"}
+        return {"error": "Not enough valid observations"}
 
     # RANSAC
     point, inliers = triangulate_ransac(origins, directions)
@@ -267,15 +249,10 @@ def triangulate(data: dict):
         dist = np.linalg.norm(np.cross(d, point - C))
         errors.append(dist)
 
-    mean_error = np.mean(errors)
-
-    print(f"📊 Mean error: {mean_error}")
-    print(f"📊 Inliers: {len(inliers)}")
-
     return {
         "X": float(point[0]),
         "Y": float(point[1]),
         "Z": float(point[2]),
-        "error_mean": float(mean_error),
+        "error_mean": float(np.mean(errors)),
         "inliers": len(inliers)
     }
