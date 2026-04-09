@@ -104,10 +104,21 @@ def triangulate(data: dict):
         origins.append(C)
         directions.append(ray_world)
 
-    point = triangulate_rays(origins, directions)
+    # 🔴 sécurité
+    if len(origins) < 2:
+        return {"error": "Not enough valid observations"}
 
-    return {
-        "X": float(point[0]),
-        "Y": float(point[1]),
-        "Z": float(point[2])
-    }
+    try:
+        point = triangulate_rays(origins, directions)
+
+        return {
+            "X": float(point[0]),
+            "Y": float(point[1]),
+            "Z": float(point[2])
+        }
+
+    except Exception as e:
+        return {
+            "error": "Triangulation failed",
+            "details": str(e)
+        }
