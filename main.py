@@ -98,23 +98,8 @@ def triangulate_rays(origins, directions):
 # ---------------- DETECTION BLEUE DEBUG ----------------
 
 def detect_blue_pipe(image_path):
-
-    full_path = f"images-2/{image_path}"
-    print(f"Trying: {full_path}")
-
-    img = cv2.imread(full_path)
-
-    if img is None:
-        print(f"❌ NOT FOUND: {image_path}")
-        return None
-
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    # 🔵 seuil large
-    lower_blue = np.array([80, 50, 50])
-    upper_blue = np.array([140, 255, 255])
-
-    mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    print(f"TEST MODE: {image_path}")
+    return [640, 360]  # centre image
 
     # nettoyage
     kernel = np.ones((5,5), np.uint8)
