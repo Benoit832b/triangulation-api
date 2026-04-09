@@ -68,15 +68,20 @@ def triangulate_rays(origins, directions):
     b = []
 
     for C, d in zip(origins, directions):
-        I = np.eye(3)
-        A.append(I - np.outer(d, d))
-        b.append((I - np.outer(d, d)) @ C)
+        d = d / np.linalg.norm(d)
 
-    A = np.vstack(A)
-    b = np.vstack(b)
+        I = np.eye(3)
+        M = I - np.outer(d, d)
+
+        A.append(M)
+        b.append(M @ C)
+
+    A = np.concatenate(A, axis=0)
+    b = np.concatenate(b, axis=0)
 
     X, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-    return X.flatten()
+
+    return X
 
 
 @app.post("/triangulate")
