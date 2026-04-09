@@ -4,7 +4,6 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
-
 def read_geo_file(filepath="geo.txt"):
     data = {}
 
@@ -94,7 +93,6 @@ def detect_red_pipe(image_path):
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # masque rouge
     lower_red1 = np.array([0, 120, 70])
     upper_red1 = np.array([10, 255, 255])
     lower_red2 = np.array([170,120,70])
@@ -103,7 +101,6 @@ def detect_red_pipe(image_path):
     mask = cv2.inRange(hsv, lower_red1, upper_red1) + \
            cv2.inRange(hsv, lower_red2, upper_red2)
 
-    # trouver contours
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     best_contour = None
@@ -112,14 +109,12 @@ def detect_red_pipe(image_path):
     for cnt in contours:
         area = cv2.contourArea(cnt)
 
-        if area < 500:  # filtre bruit
+        if area < 500:
             continue
 
         x, y, w, h = cv2.boundingRect(cnt)
-
         ratio = h / (w + 1e-5)
 
-        # 🔥 critère : forme verticale (fourreau)
         score = area * ratio
 
         if score > best_score:
@@ -129,7 +124,6 @@ def detect_red_pipe(image_path):
     if best_contour is None:
         return None
 
-    # centre du contour choisi
     M = cv2.moments(best_contour)
 
     if M["m00"] == 0:
@@ -139,9 +133,6 @@ def detect_red_pipe(image_path):
     cy = int(M["m01"] / M["m00"])
 
     return [cx, cy]
-    except Exception as e:
-        print(f"Detection error: {e}")
-        return None
 
 
 @app.post("/triangulate")
@@ -155,20 +146,18 @@ def triangulate(data: dict):
         img = obs["image"]
 
         if img not in geo_data:
-            print(f"Image not in geo.txt: {img}")
             continue
 
         cam = geo_data[img]
         C = cam["position"]
         yaw, pitch, roll = cam["orientation"]
 
-        # pixel manuel ou automatique
+        # pixel manuel ou auto
         if "pixel" in obs:
             u, v = obs["pixel"]
         else:
             pixel = detect_red_pipe(img)
             if pixel is None:
-                print(f"No detection for {img}")
                 continue
             u, v = pixel
 
@@ -179,7 +168,6 @@ def triangulate(data: dict):
         origins.append(C)
         directions.append(ray_world)
 
-    # sécurité
     if len(origins) < 2:
         return {"error": "Not enough valid observations"}
 
