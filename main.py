@@ -93,7 +93,7 @@ def triangulate(data: dict):
     origins = []
     directions = []
 
-    for obs in data["observations"]:
+for obs in data["observations"]:
     img = obs["image"]
 
     if img not in geo_data:
@@ -102,6 +102,15 @@ def triangulate(data: dict):
     cam = geo_data[img]
     C = cam["position"]
     yaw, pitch, roll = cam["orientation"]
+
+    # 🔥 NOUVEAU : pixel automatique ou manuel
+    if "pixel" in obs:
+        u, v = obs["pixel"]
+    else:
+        pixel = detect_red_pipe(img)
+        if pixel is None:
+            continue
+        u, v = pixel
 
     # 🔥 NOUVEAU : pixel automatique ou manuel
     if "pixel" in obs:
