@@ -27,6 +27,8 @@ def read_geo_file(filepath="geo.txt"):
 
         ordered_images.append(name)
 
+    print(f"Loaded {len(ordered_images)} images from geo.txt")
+
     return data, ordered_images
 
 
@@ -93,20 +95,24 @@ def triangulate_rays(origins, directions):
     return X
 
 
-# ---------------- DETECTION BLEUE ----------------
+# ---------------- DETECTION BLEUE DEBUG ----------------
 
 def detect_blue_pipe(image_path):
-    img = cv2.imread(f"images-2/{image_path}")
+
+    full_path = f"images-2/{image_path}"
+    print(f"Trying: {full_path}")
+
+    img = cv2.imread(full_path)
 
     if img is None:
-        print(f"❌ Image not found: {image_path}")
+        print(f"❌ NOT FOUND: {image_path}")
         return None
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # 🔵 bleu
-    lower_blue = np.array([90, 100, 50])
-    upper_blue = np.array([130, 255, 255])
+    # 🔵 seuil large
+    lower_blue = np.array([80, 50, 50])
+    upper_blue = np.array([140, 255, 255])
 
     mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
@@ -114,17 +120,16 @@ def detect_blue_pipe(image_path):
     kernel = np.ones((5,5), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    # moments → centre du tube
     moments = cv2.moments(mask)
 
     if moments["m00"] == 0:
-        print(f"❌ No blue detected: {image_path}")
+        print(f"❌ NO BLUE DETECTED: {image_path}")
         return None
 
     cx = int(moments["m10"] / moments["m00"])
     cy = int(moments["m01"] / moments["m00"])
 
-    print(f"✅ {image_path} → {cx},{cy}")
+    print(f"✅ DETECTED: {image_path} → ({cx},{cy})")
 
     return [cx, cy]
 
@@ -139,6 +144,7 @@ def compute_point(images_subset, geo_data):
     for img in images_subset:
 
         if img not in geo_data:
+            print(f"❌ NOT IN GEO: {img}")
             continue
 
         pixel = detect_blue_pipe(img)
@@ -156,6 +162,8 @@ def compute_point(images_subset, geo_data):
 
         origins.append(C)
         directions.append(ray)
+
+    print(f"Valid rays: {len(origins)}")
 
     if len(origins) < 3:
         return None
@@ -181,10 +189,14 @@ def reconstruct():
 
         subset = ordered_images[i:i+window]
 
+        print(f"\n--- WINDOW {i} → {i+window} ---")
+
         point = compute_point(subset, geo_data)
 
         if point is not None:
             points.append(point.tolist())
+
+    print(f"\nFINAL POINTS: {len(points)}")
 
     return {
         "points_3D": points,
