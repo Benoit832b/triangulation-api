@@ -92,30 +92,53 @@ def detect_red_pipe(image_path):
         print(f"Image not found: {image_path}")
         return None
 
-    try:
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-        lower_red1 = np.array([0, 120, 70])
-        upper_red1 = np.array([10, 255, 255])
+    # masque rouge
+    lower_red1 = np.array([0, 120, 70])
+    upper_red1 = np.array([10, 255, 255])
+    lower_red2 = np.array([170,120,70])
+    upper_red2 = np.array([180,255,255])
 
-        lower_red2 = np.array([170, 120, 70])
-        upper_red2 = np.array([180, 255, 255])
+    mask = cv2.inRange(hsv, lower_red1, upper_red1) + \
+           cv2.inRange(hsv, lower_red2, upper_red2)
 
-        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+    # trouver contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        mask = mask1 + mask2
+    best_contour = None
+    best_score = 0
 
-        moments = cv2.moments(mask)
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
 
-        if moments["m00"] == 0:
-            return None
+        if area < 500:  # filtre bruit
+            continue
 
-        cx = int(moments["m10"] / moments["m00"])
-        cy = int(moments["m01"] / moments["m00"])
+        x, y, w, h = cv2.boundingRect(cnt)
 
-        return [cx, cy]
+        ratio = h / (w + 1e-5)
 
+        # 🔥 critère : forme verticale (fourreau)
+        score = area * ratio
+
+        if score > best_score:
+            best_score = score
+            best_contour = cnt
+
+    if best_contour is None:
+        return None
+
+    # centre du contour choisi
+    M = cv2.moments(best_contour)
+
+    if M["m00"] == 0:
+        return None
+
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+
+    return [cx, cy]
     except Exception as e:
         print(f"Detection error: {e}")
         return None
