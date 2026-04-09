@@ -1,3 +1,5 @@
+import cv2
+import numpy as np
 from fastapi import FastAPI
 import numpy as np
 
@@ -127,3 +129,35 @@ def triangulate(data: dict):
             "error": "Triangulation failed",
             "details": str(e)
         }
+
+def detect_red_pipe(image_path):
+    img = cv2.imread(image_path)
+
+    if img is None:
+        return None
+
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    # rouge bas
+    lower_red1 = np.array([0, 120, 70])
+    upper_red1 = np.array([10, 255, 255])
+
+    # rouge haut
+    lower_red2 = np.array([170,120,70])
+    upper_red2 = np.array([180,255,255])
+
+    mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+    mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+
+    mask = mask1 + mask2
+
+    # trouver centre
+    moments = cv2.moments(mask)
+
+    if moments["m00"] == 0:
+        return None
+
+    cx = int(moments["m10"] / moments["m00"])
+    cy = int(moments["m01"] / moments["m00"])
+
+    return [cx, cy]
