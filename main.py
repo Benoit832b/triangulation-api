@@ -93,15 +93,21 @@ def triangulate_rays(origins, directions):
     return X
 
 
-# ---------------- DETECTION ----------------
+# ---------------- DETECTION CORRIGÉE ----------------
 
 def detect_red_pipe(image_path):
     img = cv2.imread(f"images/{image_path}")
 
     if img is None:
+        print(f"❌ Image not found: {image_path}")
         return None
 
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, w = img.shape[:2]
+
+    # 🔥 ROI = zone tranchée
+    roi = img[int(h*0.4):h, int(w*0.2):int(w*0.8)]
+
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
     lower_red1 = np.array([0, 120, 70])
     upper_red1 = np.array([10, 255, 255])
@@ -113,40 +119,54 @@ def detect_red_pipe(image_path):
 
     edges = cv2.Canny(mask, 50, 150)
 
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180,
-                            threshold=50,
-                            minLineLength=100,
-                            maxLineGap=20)
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi/180,
+        threshold=50,
+        minLineLength=80,
+        maxLineGap=20
+    )
 
     if lines is None:
+        print(f"❌ No lines: {image_path}")
         return None
 
     best_line = None
-    best_len = 0
+    best_score = 0
 
     for line in lines:
         x1, y1, x2, y2 = line[0]
 
         dx = x2 - x1
         dy = y2 - y1
+
+        # 🔥 filtre vertical
+        if abs(dx) > abs(dy):
+            continue
+
         length = np.sqrt(dx*dx + dy*dy)
 
-        if length > best_len:
-            best_len = length
+        if length > best_score:
+            best_score = length
             best_line = (x1, y1, x2, y2)
 
     if best_line is None:
+        print(f"❌ No valid pipe: {image_path}")
         return None
 
     x1, y1, x2, y2 = best_line
 
-    cx = int((x1 + x2) / 2)
-    cy = int(max(y1, y2))  # point bas
+    # 🔥 repositionnement global
+    cx = int((x1 + x2)/2 + w*0.2)
+    cy = int(max(y1, y2) + h*0.4)
+
+    print(f"✅ {image_path} → {cx},{cy}")
 
     return [cx, cy]
 
 
-# ---------------- PIPELINE MULTI-POINTS ----------------
+# ---------------- MULTI POINTS ----------------
 
 def compute_point(images_subset, geo_data):
 
@@ -196,8 +216,8 @@ def reconstruct():
 
     points = []
 
-    step = 5     # déplacement
-    window = 10  # nb images
+    step = 5
+    window = 10
 
     for i in range(0, len(ordered_images) - window, step):
 
@@ -208,7 +228,7 @@ def reconstruct():
         if point is not None:
             points.append(point.tolist())
 
-    # 🔥 lissage simple
+    # 🔥 lissage
     smoothed = []
     for i in range(1, len(points)-1):
         avg = (
