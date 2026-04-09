@@ -7,15 +7,18 @@ def read_geo_file(filepath="geo.txt"):
     data = {}
 
     with open(filepath, "r") as f:
-        lines = f.readlines()[1:]  # skip EPSG
+        lines = f.readlines()[1:]
 
     for line in lines:
         parts = line.strip().split()
         name = parts[0]
+
         X, Y, Z = map(float, parts[1:4])
+        yaw, pitch, roll = map(float, parts[4:7])
 
         data[name] = {
-            "position": [X, Y, Z]
+            "position": np.array([X, Y, Z]),
+            "orientation": [yaw, pitch, roll]
         }
 
     return data
@@ -23,20 +26,17 @@ def read_geo_file(filepath="geo.txt"):
 
 @app.post("/triangulate")
 def triangulate(data: dict):
-    images = data["images"]
-
     geo_data = read_geo_file()
 
-    observations = []
+    observations = data["observations"]
 
-    for img in images:
+    pts = []
+
+    for obs in observations:
+        img = obs["image"]
         if img in geo_data:
-            observations.append(geo_data[img])
+            pts.append(geo_data[img]["position"])
 
-    if not observations:
-        return {"error": "No matching images found"}
-
-    pts = [o["position"] for o in observations]
     point = np.mean(pts, axis=0)
 
     return {
