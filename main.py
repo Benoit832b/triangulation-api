@@ -93,73 +93,36 @@ def triangulate_rays(origins, directions):
     return X
 
 
-# ---------------- DETECTION CORRIGÉE ----------------
+# ---------------- DETECTION BLEUE ----------------
 
-def detect_red_pipe(image_path):
-    img = cv2.imread(f"images/{image_path}")
+def detect_blue_pipe(image_path):
+    img = cv2.imread(f"images-2/{image_path}")
 
     if img is None:
         print(f"❌ Image not found: {image_path}")
         return None
 
-    h, w = img.shape[:2]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # 🔥 ROI = zone tranchée
-    roi = img[int(h*0.4):h, int(w*0.2):int(w*0.8)]
+    # 🔵 bleu
+    lower_blue = np.array([90, 100, 50])
+    upper_blue = np.array([130, 255, 255])
 
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-    lower_red1 = np.array([0, 120, 70])
-    upper_red1 = np.array([10, 255, 255])
-    lower_red2 = np.array([170,120,70])
-    upper_red2 = np.array([180,255,255])
+    # nettoyage
+    kernel = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    mask = cv2.inRange(hsv, lower_red1, upper_red1) + \
-           cv2.inRange(hsv, lower_red2, upper_red2)
+    # moments → centre du tube
+    moments = cv2.moments(mask)
 
-    edges = cv2.Canny(mask, 50, 150)
-
-    lines = cv2.HoughLinesP(
-        edges,
-        1,
-        np.pi/180,
-        threshold=50,
-        minLineLength=80,
-        maxLineGap=20
-    )
-
-    if lines is None:
-        print(f"❌ No lines: {image_path}")
+    if moments["m00"] == 0:
+        print(f"❌ No blue detected: {image_path}")
         return None
 
-    best_line = None
-    best_score = 0
-
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-
-        dx = x2 - x1
-        dy = y2 - y1
-
-        # 🔥 filtre vertical
-        if abs(dx) > abs(dy):
-            continue
-
-        length = np.sqrt(dx*dx + dy*dy)
-
-        if length > best_score:
-            best_score = length
-            best_line = (x1, y1, x2, y2)
-
-    if best_line is None:
-        print(f"❌ No valid pipe: {image_path}")
-        return None
-
-    x1, y1, x2, y2 = best_line
-
-    # 🔥 repositionnement global
-    cx = int((x1 + x2)/2 + w*0.2)
-    cy = int(max(y1, y2) + h*0.4)
+    cx = int(moments["m10"] / moments["m00"])
+    cy = int(moments["m01"] / moments["m00"])
 
     print(f"✅ {image_path} → {cx},{cy}")
 
@@ -178,7 +141,7 @@ def compute_point(images_subset, geo_data):
         if img not in geo_data:
             continue
 
-        pixel = detect_red_pipe(img)
+        pixel = detect_blue_pipe(img)
         if pixel is None:
             continue
 
@@ -198,11 +161,6 @@ def compute_point(images_subset, geo_data):
         return None
 
     point = triangulate_rays(origins, directions)
-
-    # 🔥 correction Z (fond tranchée)
-    z_cam = np.mean([C[2] for C in origins])
-    if point[2] > z_cam - 0.5:
-        point[2] = z_cam - 1.2
 
     return point
 
@@ -228,17 +186,7 @@ def reconstruct():
         if point is not None:
             points.append(point.tolist())
 
-    # 🔥 lissage
-    smoothed = []
-    for i in range(1, len(points)-1):
-        avg = (
-            np.array(points[i-1]) +
-            np.array(points[i]) +
-            np.array(points[i+1])
-        ) / 3
-        smoothed.append(avg.tolist())
-
     return {
-        "points_3D": smoothed,
-        "count": len(smoothed)
+        "points_3D": points,
+        "count": len(points)
     }
