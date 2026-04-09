@@ -93,47 +93,12 @@ def triangulate_rays(origins, directions):
     return X
 
 
-# ---------------- RANSAC ----------------
-
-def triangulate_ransac(origins, directions, threshold=0.3, iterations=100):
-    best_point = None
-    best_inliers = []
-
-    n = len(origins)
-
-    if n < 2:
-        return None, []
-
-    for _ in range(iterations):
-        idx = np.random.choice(n, 2, replace=False)
-
-        p = triangulate_rays(
-            [origins[i] for i in idx],
-            [directions[i] for i in idx]
-        )
-
-        inliers = []
-        for i in range(n):
-            C = origins[i]
-            d = directions[i]
-            dist = np.linalg.norm(np.cross(d, p - C))
-            if dist < threshold:
-                inliers.append(i)
-
-        if len(inliers) > len(best_inliers):
-            best_inliers = inliers
-            best_point = p
-
-    return best_point, best_inliers
-
-
 # ---------------- DETECTION ----------------
 
 def detect_red_pipe(image_path):
     img = cv2.imread(f"images/{image_path}")
 
     if img is None:
-        print(f"❌ Image not found: {image_path}")
         return None
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -154,11 +119,10 @@ def detect_red_pipe(image_path):
                             maxLineGap=20)
 
     if lines is None:
-        print(f"❌ No lines: {image_path}")
         return None
 
     best_line = None
-    best_score = 0
+    best_len = 0
 
     for line in lines:
         x1, y1, x2, y2 = line[0]
@@ -167,20 +131,11 @@ def detect_red_pipe(image_path):
         dy = y2 - y1
         length = np.sqrt(dx*dx + dy*dy)
 
-        if length < 100:
-            continue
-
-        angle = abs(dy) / (abs(dx) + 1e-5)
-
-        if angle < 1:
-            continue
-
-        if length > best_score:
-            best_score = length
+        if length > best_len:
+            best_len = length
             best_line = (x1, y1, x2, y2)
 
     if best_line is None:
-        print(f"❌ No valid pipe: {image_path}")
         return None
 
     x1, y1, x2, y2 = best_line
@@ -188,32 +143,20 @@ def detect_red_pipe(image_path):
     cx = int((x1 + x2) / 2)
     cy = int(max(y1, y2))  # point bas
 
-    print(f"✅ {image_path} → {cx},{cy}")
-
     return [cx, cy]
 
 
-# ---------------- API ----------------
+# ---------------- PIPELINE MULTI-POINTS ----------------
 
-@app.post("/triangulate")
-def triangulate():
-
-    geo_data, ordered_images = read_geo_file()
-
-    # 🔥 10 images consécutives
-    subset = ordered_images[0:10]
+def compute_point(images_subset, geo_data):
 
     origins = []
     directions = []
 
-    for img in subset:
+    for img in images_subset:
 
         if img not in geo_data:
             continue
-
-        cam = geo_data[img]
-        C = cam["position"]
-        yaw, pitch, roll = cam["orientation"]
 
         pixel = detect_red_pipe(img)
         if pixel is None:
@@ -221,38 +164,61 @@ def triangulate():
 
         u, v = pixel
 
+        cam = geo_data[img]
+        C = cam["position"]
+        yaw, pitch, roll = cam["orientation"]
+
         R = euler_to_rotation(yaw, pitch, roll)
         ray = R @ pixel_to_ray(u, v)
 
         origins.append(C)
         directions.append(ray)
 
-    print(f"\n👉 VALID OBS: {len(origins)}")
-
-    if len(origins) < 2:
-        return {"error": "Not enough valid observations"}
-
-    # RANSAC
-    point, inliers = triangulate_ransac(origins, directions)
-
-    if point is None:
-        return {"error": "RANSAC failed"}
-
-    origins = [origins[i] for i in inliers]
-    directions = [directions[i] for i in inliers]
+    if len(origins) < 3:
+        return None
 
     point = triangulate_rays(origins, directions)
 
-    # erreur
-    errors = []
-    for C, d in zip(origins, directions):
-        dist = np.linalg.norm(np.cross(d, point - C))
-        errors.append(dist)
+    # 🔥 correction Z (fond tranchée)
+    z_cam = np.mean([C[2] for C in origins])
+    if point[2] > z_cam - 0.5:
+        point[2] = z_cam - 1.2
+
+    return point
+
+
+# ---------------- API ----------------
+
+@app.post("/reconstruct")
+def reconstruct():
+
+    geo_data, ordered_images = read_geo_file()
+
+    points = []
+
+    step = 5     # déplacement
+    window = 10  # nb images
+
+    for i in range(0, len(ordered_images) - window, step):
+
+        subset = ordered_images[i:i+window]
+
+        point = compute_point(subset, geo_data)
+
+        if point is not None:
+            points.append(point.tolist())
+
+    # 🔥 lissage simple
+    smoothed = []
+    for i in range(1, len(points)-1):
+        avg = (
+            np.array(points[i-1]) +
+            np.array(points[i]) +
+            np.array(points[i+1])
+        ) / 3
+        smoothed.append(avg.tolist())
 
     return {
-        "X": float(point[0]),
-        "Y": float(point[1]),
-        "Z": float(point[2]),
-        "error_mean": float(np.mean(errors)),
-        "inliers": len(inliers)
+        "points_3D": smoothed,
+        "count": len(smoothed)
     }
