@@ -8,6 +8,7 @@ app = FastAPI()
 
 def read_geo_file(filepath="geo.txt"):
     data = {}
+    ordered_images = []
 
     with open(filepath, "r") as f:
         lines = f.readlines()[1:]
@@ -24,7 +25,9 @@ def read_geo_file(filepath="geo.txt"):
             "orientation": [yaw, pitch, roll]
         }
 
-    return data
+        ordered_images.append(name)
+
+    return data, ordered_images
 
 
 # ---------------- ROTATION ----------------
