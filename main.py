@@ -4,6 +4,8 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
+# ---------------- GEO ----------------
+
 def read_geo_file(filepath="geo.txt"):
     data = {}
 
@@ -24,6 +26,8 @@ def read_geo_file(filepath="geo.txt"):
 
     return data
 
+
+# ---------------- ROTATION ----------------
 
 def euler_to_rotation(yaw, pitch, roll):
     yaw = np.radians(yaw)
@@ -51,8 +55,11 @@ def euler_to_rotation(yaw, pitch, roll):
     return Rz @ Ry @ Rx
 
 
+# ---------------- CAMERA ----------------
+
 def pixel_to_ray(u, v):
-    fx = fy = 1000
+    # intrinsics réalistes pour 1280x720
+    fx = fy = 900
     cx = 640
     cy = 360
 
@@ -62,6 +69,8 @@ def pixel_to_ray(u, v):
     ray = np.array([x, y, 1.0])
     return ray / np.linalg.norm(ray)
 
+
+# ---------------- TRIANGULATION ----------------
 
 def triangulate_rays(origins, directions):
     A = []
@@ -84,6 +93,8 @@ def triangulate_rays(origins, directions):
     return X
 
 
+# ---------------- DETECTION LIGNE ----------------
+
 def detect_red_pipe(image_path):
     img = cv2.imread(image_path)
 
@@ -93,6 +104,7 @@ def detect_red_pipe(image_path):
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
+    # masque rouge
     lower_red1 = np.array([0, 120, 70])
     upper_red1 = np.array([10, 255, 255])
     lower_red2 = np.array([170,120,70])
@@ -101,39 +113,55 @@ def detect_red_pipe(image_path):
     mask = cv2.inRange(hsv, lower_red1, upper_red1) + \
            cv2.inRange(hsv, lower_red2, upper_red2)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # edge detection
+    edges = cv2.Canny(mask, 50, 150)
 
-    best_contour = None
+    # Hough transform
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50,
+                           minLineLength=100, maxLineGap=20)
+
+    if lines is None:
+        return None
+
+    best_line = None
     best_score = 0
 
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
 
-        if area < 500:
+        dx = x2 - x1
+        dy = y2 - y1
+
+        length = np.sqrt(dx*dx + dy*dy)
+
+        if length < 100:
             continue
 
-        x, y, w, h = cv2.boundingRect(cnt)
-        ratio = h / (w + 1e-5)
+        angle = abs(dy) / (abs(dx) + 1e-5)
 
-        score = area * ratio
+        # 🔥 filtre : lignes plutôt verticales (fourreau)
+        if angle < 1:
+            continue
+
+        score = length
 
         if score > best_score:
             best_score = score
-            best_contour = cnt
+            best_line = (x1, y1, x2, y2)
 
-    if best_contour is None:
+    if best_line is None:
         return None
 
-    M = cv2.moments(best_contour)
+    x1, y1, x2, y2 = best_line
 
-    if M["m00"] == 0:
-        return None
-
-    cx = int(M["m10"] / M["m00"])
-    cy = int(M["m01"] / M["m00"])
+    # centre de la ligne
+    cx = int((x1 + x2) / 2)
+    cy = int((y1 + y2) / 2)
 
     return [cx, cy]
 
+
+# ---------------- API ----------------
 
 @app.post("/triangulate")
 def triangulate(data: dict):
@@ -158,6 +186,7 @@ def triangulate(data: dict):
         else:
             pixel = detect_red_pipe(img)
             if pixel is None:
+                print(f"No detection for {img}")
                 continue
             u, v = pixel
 
@@ -173,6 +202,17 @@ def triangulate(data: dict):
 
     try:
         point = triangulate_rays(origins, directions)
+
+        # 🔥 CONTRAINTE SOL (Z réaliste)
+        avg_cam_z = np.mean([c[2] for c in origins])
+
+        if abs(point[2] - avg_cam_z) > 5:
+            return {"error": "Z out of realistic range"}
+
+        # 🔥 REJET DES POINTS ABERRANTS
+        dist = np.linalg.norm(point - origins[0])
+        if dist > 50:
+            return {"error": "Triangulation unstable (too far)"}
 
         return {
             "X": float(point[0]),
