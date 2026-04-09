@@ -58,7 +58,7 @@ def euler_to_rotation(yaw, pitch, roll):
 # ---------------- CAMERA ----------------
 
 def pixel_to_ray(u, v):
-    fx = fy = 900  # adapté 1280x720
+    fx = fy = 900
     cx = 640
     cy = 360
 
@@ -92,7 +92,7 @@ def triangulate_rays(origins, directions):
 
 # ---------------- RANSAC ----------------
 
-def triangulate_ransac(origins, directions, threshold=0.2, iterations=100):
+def triangulate_ransac(origins, directions, threshold=0.3, iterations=100):
     best_point = None
     best_inliers = []
 
@@ -136,7 +136,7 @@ def detect_red_pipe(image_path):
     img = cv2.imread(image_path)
 
     if img is None:
-        print(f"Image not found: {image_path}")
+        print(f"❌ Image not found: {image_path}")
         return None
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -157,6 +157,7 @@ def detect_red_pipe(image_path):
                             maxLineGap=20)
 
     if lines is None:
+        print("❌ No lines detected")
         return None
 
     best_line = None
@@ -174,7 +175,6 @@ def detect_red_pipe(image_path):
 
         angle = abs(dy) / (abs(dx) + 1e-5)
 
-        # garder lignes verticales (fourreau)
         if angle < 1:
             continue
 
@@ -183,13 +183,15 @@ def detect_red_pipe(image_path):
             best_line = (x1, y1, x2, y2)
 
     if best_line is None:
+        print("❌ No valid pipe line")
         return None
 
     x1, y1, x2, y2 = best_line
 
-    # 🔥 POINT BAS (CRITIQUE POUR Z)
     cx = int((x1 + x2) / 2)
-    cy = int(max(y1, y2))
+    cy = int(max(y1, y2))  # 🔥 point bas
+
+    print(f"✅ Detection OK: {cx}, {cy}")
 
     return [cx, cy]
 
@@ -205,8 +207,10 @@ def triangulate(data: dict):
 
     for obs in data["observations"]:
         img = obs["image"]
+        print(f"\n📷 Processing: {img}")
 
         if img not in geo_data:
+            print("❌ NOT IN GEO")
             continue
 
         cam = geo_data[img]
@@ -215,9 +219,11 @@ def triangulate(data: dict):
 
         if "pixel" in obs:
             u, v = obs["pixel"]
+            print(f"🟡 Manual pixel: {u}, {v}")
         else:
             pixel = detect_red_pipe(img)
             if pixel is None:
+                print("❌ Detection failed")
                 continue
             u, v = pixel
 
@@ -227,22 +233,24 @@ def triangulate(data: dict):
         origins.append(C)
         directions.append(ray)
 
-    if len(origins) < 5:
-        return {"error": "Not enough valid observations"}
+    print(f"\n👉 VALID OBSERVATIONS: {len(origins)}")
 
-    # 🔥 FILTRE ANGULAIRE
+    if len(origins) < 2:
+        return {"error": f"Only {len(origins)} valid observations"}
+
+    # filtre angle
     angles = []
     for i in range(len(directions)):
         for j in range(i+1, len(directions)):
             angles.append(angle_between(directions[i], directions[j]))
 
-    if np.mean(angles) < 5:
-        return {"error": "Weak geometry (rays too parallel)"}
+    if np.mean(angles) < 3:
+        return {"error": "Weak geometry"}
 
-    # 🔥 RANSAC
+    # RANSAC
     point, inliers = triangulate_ransac(origins, directions)
 
-    if point is None or len(inliers) < 5:
+    if point is None:
         return {"error": "RANSAC failed"}
 
     origins = [origins[i] for i in inliers]
@@ -250,19 +258,16 @@ def triangulate(data: dict):
 
     point = triangulate_rays(origins, directions)
 
-    # 🔥 CONTRAINTE SOL
-    min_z = min([c[2] for c in origins])
-
-    if point[2] > min_z - 0.5:
-        return {"error": "Point above ground"}
-
-    # 🔥 ERREUR MOYENNE
+    # erreur
     errors = []
     for C, d in zip(origins, directions):
         dist = np.linalg.norm(np.cross(d, point - C))
         errors.append(dist)
 
     mean_error = np.mean(errors)
+
+    print(f"📊 Mean error: {mean_error}")
+    print(f"📊 Inliers: {len(inliers)}")
 
     return {
         "X": float(point[0]),
