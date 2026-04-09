@@ -58,8 +58,7 @@ def euler_to_rotation(yaw, pitch, roll):
 # ---------------- CAMERA ----------------
 
 def pixel_to_ray(u, v):
-    # intrinsics réalistes pour 1280x720
-    fx = fy = 900
+    fx = fy = 900  # adapté 1280x720
     cx = 640
     cy = 360
 
@@ -78,7 +77,6 @@ def triangulate_rays(origins, directions):
 
     for C, d in zip(origins, directions):
         d = d / np.linalg.norm(d)
-
         I = np.eye(3)
         M = I - np.outer(d, d)
 
@@ -89,11 +87,50 @@ def triangulate_rays(origins, directions):
     b = np.concatenate(b, axis=0)
 
     X, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
-
     return X
 
 
-# ---------------- DETECTION LIGNE ----------------
+# ---------------- RANSAC ----------------
+
+def triangulate_ransac(origins, directions, threshold=0.2, iterations=100):
+    best_point = None
+    best_inliers = []
+
+    n = len(origins)
+
+    if n < 2:
+        return None, []
+
+    for _ in range(iterations):
+        idx = np.random.choice(n, 2, replace=False)
+
+        p = triangulate_rays(
+            [origins[i] for i in idx],
+            [directions[i] for i in idx]
+        )
+
+        inliers = []
+        for i in range(n):
+            C = origins[i]
+            d = directions[i]
+            dist = np.linalg.norm(np.cross(d, p - C))
+            if dist < threshold:
+                inliers.append(i)
+
+        if len(inliers) > len(best_inliers):
+            best_inliers = inliers
+            best_point = p
+
+    return best_point, best_inliers
+
+
+# ---------------- ANGLE ----------------
+
+def angle_between(d1, d2):
+    return np.degrees(np.arccos(np.clip(np.dot(d1, d2), -1, 1)))
+
+
+# ---------------- DETECTION ----------------
 
 def detect_red_pipe(image_path):
     img = cv2.imread(image_path)
@@ -104,7 +141,6 @@ def detect_red_pipe(image_path):
 
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
-    # masque rouge
     lower_red1 = np.array([0, 120, 70])
     upper_red1 = np.array([10, 255, 255])
     lower_red2 = np.array([170,120,70])
@@ -113,12 +149,12 @@ def detect_red_pipe(image_path):
     mask = cv2.inRange(hsv, lower_red1, upper_red1) + \
            cv2.inRange(hsv, lower_red2, upper_red2)
 
-    # edge detection
     edges = cv2.Canny(mask, 50, 150)
 
-    # Hough transform
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50,
-                           minLineLength=100, maxLineGap=20)
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180,
+                            threshold=50,
+                            minLineLength=100,
+                            maxLineGap=20)
 
     if lines is None:
         return None
@@ -131,7 +167,6 @@ def detect_red_pipe(image_path):
 
         dx = x2 - x1
         dy = y2 - y1
-
         length = np.sqrt(dx*dx + dy*dy)
 
         if length < 100:
@@ -139,14 +174,12 @@ def detect_red_pipe(image_path):
 
         angle = abs(dy) / (abs(dx) + 1e-5)
 
-        # 🔥 filtre : lignes plutôt verticales (fourreau)
+        # garder lignes verticales (fourreau)
         if angle < 1:
             continue
 
-        score = length
-
-        if score > best_score:
-            best_score = score
+        if length > best_score:
+            best_score = length
             best_line = (x1, y1, x2, y2)
 
     if best_line is None:
@@ -154,9 +187,9 @@ def detect_red_pipe(image_path):
 
     x1, y1, x2, y2 = best_line
 
-    # centre de la ligne
+    # 🔥 POINT BAS (CRITIQUE POUR Z)
     cx = int((x1 + x2) / 2)
-    cy = int((y1 + y2) / 2)
+    cy = int(max(y1, y2))
 
     return [cx, cy]
 
@@ -180,48 +213,61 @@ def triangulate(data: dict):
         C = cam["position"]
         yaw, pitch, roll = cam["orientation"]
 
-        # pixel manuel ou auto
         if "pixel" in obs:
             u, v = obs["pixel"]
         else:
             pixel = detect_red_pipe(img)
             if pixel is None:
-                print(f"No detection for {img}")
                 continue
             u, v = pixel
 
         R = euler_to_rotation(yaw, pitch, roll)
-        ray_cam = pixel_to_ray(u, v)
-        ray_world = R @ ray_cam
+        ray = R @ pixel_to_ray(u, v)
 
         origins.append(C)
-        directions.append(ray_world)
+        directions.append(ray)
 
-    if len(origins) < 2:
+    if len(origins) < 5:
         return {"error": "Not enough valid observations"}
 
-    try:
-        point = triangulate_rays(origins, directions)
+    # 🔥 FILTRE ANGULAIRE
+    angles = []
+    for i in range(len(directions)):
+        for j in range(i+1, len(directions)):
+            angles.append(angle_between(directions[i], directions[j]))
 
-        # 🔥 CONTRAINTE SOL (Z réaliste)
-        avg_cam_z = np.mean([c[2] for c in origins])
+    if np.mean(angles) < 5:
+        return {"error": "Weak geometry (rays too parallel)"}
 
-        if abs(point[2] - avg_cam_z) > 5:
-            return {"error": "Z out of realistic range"}
+    # 🔥 RANSAC
+    point, inliers = triangulate_ransac(origins, directions)
 
-        # 🔥 REJET DES POINTS ABERRANTS
-        dist = np.linalg.norm(point - origins[0])
-        if dist > 50:
-            return {"error": "Triangulation unstable (too far)"}
+    if point is None or len(inliers) < 5:
+        return {"error": "RANSAC failed"}
 
-        return {
-            "X": float(point[0]),
-            "Y": float(point[1]),
-            "Z": float(point[2])
-        }
+    origins = [origins[i] for i in inliers]
+    directions = [directions[i] for i in inliers]
 
-    except Exception as e:
-        return {
-            "error": "Triangulation failed",
-            "details": str(e)
-        }
+    point = triangulate_rays(origins, directions)
+
+    # 🔥 CONTRAINTE SOL
+    min_z = min([c[2] for c in origins])
+
+    if point[2] > min_z - 0.5:
+        return {"error": "Point above ground"}
+
+    # 🔥 ERREUR MOYENNE
+    errors = []
+    for C, d in zip(origins, directions):
+        dist = np.linalg.norm(np.cross(d, point - C))
+        errors.append(dist)
+
+    mean_error = np.mean(errors)
+
+    return {
+        "X": float(point[0]),
+        "Y": float(point[1]),
+        "Z": float(point[2]),
+        "error_mean": float(mean_error),
+        "inliers": len(inliers)
+    }
