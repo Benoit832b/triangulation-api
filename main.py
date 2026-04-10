@@ -7,7 +7,7 @@ import base64
 app = FastAPI()
 
 # =========================
-# PARAMÈTRES
+# PARAMÈTRES CAMÉRA
 # =========================
 
 IMAGE_WIDTH = 1280
@@ -48,7 +48,7 @@ def euler_to_rotation(yaw, pitch, roll):
     return Rz @ Ry @ Rx
 
 # =========================
-# GEO
+# GEO.TXT
 # =========================
 
 def load_geo():
@@ -65,7 +65,6 @@ def load_geo():
             continue
 
         name = parts[0]
-
         X, Y, Z = map(float, parts[1:4])
         yaw, pitch, roll = map(float, parts[4:7])
 
@@ -73,11 +72,11 @@ def load_geo():
 
         data["observations"].append({
             "image": name,
-            "position": [X, Y, Z],
-            "rotation": R.tolist()
+            "position": np.array([X, Y, Z]),
+            "rotation": R
         })
 
-    print("GEO loaded:", len(data["observations"]))
+    print(f"GEO loaded: {len(data['observations'])} cameras")
 
     return data
 
@@ -86,9 +85,9 @@ def get_camera_pose(geo, image_name):
 
     for obs in geo["observations"]:
         if obs["image"] == image_name:
-            return np.array(obs["position"]), np.array(obs["rotation"])
+            return obs["position"], obs["rotation"]
 
-    print("GEO not found:", image_name)
+    print("❌ GEO NOT FOUND:", image_name)
     return None, None
 
 # =========================
@@ -97,7 +96,7 @@ def get_camera_pose(geo, image_name):
 
 def build_projection_matrix(position, rotation):
 
-    R = np.array(rotation)
+    R = rotation
     t = -R @ position
 
     K = np.array([
@@ -111,39 +110,40 @@ def build_projection_matrix(position, rotation):
     return K @ RT
 
 # =========================
-# DETECTION BLEU + DEBUG BASE64
+# DETECTION BLEU (ROBUSTE)
 # =========================
 
 def detect_blue_pipe(image):
 
-    try:
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-        lower_blue = np.array([85, 70, 70])
-        upper_blue = np.array([140, 255, 255])
+    # 🔥 plage large (terrain)
+    lower_blue = np.array([70, 40, 40])
+    upper_blue = np.array([150, 255, 255])
 
-        mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-        # 🔥 conversion base64 pour debug
-        _, buffer = cv2.imencode('.jpg', mask)
-        debug_img = base64.b64encode(buffer).decode("utf-8")
+    # 🔥 nettoyage morphologique
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.dilate(mask, kernel, iterations=2)
 
-        moments = cv2.moments(mask)
+    # debug base64
+    _, buffer = cv2.imencode('.jpg', mask)
+    debug_img = base64.b64encode(buffer).decode("utf-8")
 
-        if moments["m00"] == 0:
-            print("❌ NO BLUE DETECTED")
-            return None, debug_img
+    moments = cv2.moments(mask)
 
-        cx = int(moments["m10"] / moments["m00"])
-        cy = int(moments["m01"] / moments["m00"])
+    if moments["m00"] < 500:
+        print("❌ NO BLUE DETECTED")
+        return None, debug_img
 
-        print(f"✅ DETECTED: {cx}, {cy}")
+    cx = int(moments["m10"] / moments["m00"])
+    cy = int(moments["m01"] / moments["m00"])
 
-        return [[cx, cy]], debug_img
+    print(f"✅ BLUE DETECTED: {cx}, {cy}")
 
-    except Exception as e:
-        print("detect error:", e)
-        return None, None
+    return [[cx, cy]], debug_img
 
 # =========================
 # TRIANGULATION
@@ -151,24 +151,19 @@ def detect_blue_pipe(image):
 
 def triangulate_points(P1, P2, pts1, pts2):
 
-    try:
-        pts1 = np.array(pts1).T.astype(np.float32)
-        pts2 = np.array(pts2).T.astype(np.float32)
+    pts1 = np.array(pts1).T.astype(np.float32)
+    pts2 = np.array(pts2).T.astype(np.float32)
 
-        if pts1.shape[1] < 1:
-            return []
-
-        points_4d = cv2.triangulatePoints(P1, P2, pts1, pts2)
-        points_3d = points_4d[:3] / points_4d[3]
-
-        return points_3d.T.tolist()
-
-    except Exception as e:
-        print("triangulation error:", e)
+    if pts1.shape[1] < 1:
         return []
 
+    points_4d = cv2.triangulatePoints(P1, P2, pts1, pts2)
+    points_3d = points_4d[:3] / points_4d[3]
+
+    return points_3d.T.tolist()
+
 # =========================
-# FILTRAGE
+# FILTRE ALTITUDE
 # =========================
 
 def filter_points(points):
@@ -178,10 +173,8 @@ def filter_points(points):
     for p in points:
         try:
             x, y, z = p
-
-            if 290 < z < 320:
+            if 0 < z < 1000:  # 🔥 large pour debug
                 filtered.append(p)
-
         except:
             continue
 
@@ -194,85 +187,74 @@ def filter_points(points):
 @app.get("/reconstruct")
 def reconstruct():
 
-    try:
+    geo = load_geo()
 
-        geo = load_geo()
+    if not os.path.exists("images"):
+        return {"error": "images folder missing"}
 
-        if not os.path.exists("images"):
-            return {"error": "images folder not found"}
+    image_files = sorted(os.listdir("images"))
 
-        image_files = sorted(os.listdir("images"))
+    if len(image_files) < 2:
+        return {"error": "not enough images"}
 
-        if len(image_files) < 2:
-            return {"error": "not enough images"}
+    print("Images found:", len(image_files))
 
-        print("Images:", len(image_files))
+    all_points = []
+    debug1 = None
+    debug2 = None
 
-        all_points = []
-        debug1 = None
-        debug2 = None
+    for i in range(len(image_files) - 1):
 
-        for i in range(len(image_files) - 1):
+        img1_name = image_files[i]
+        img2_name = image_files[i + 1]
 
-            img1_name = image_files[i]
-            img2_name = image_files[i + 1]
+        print("Processing:", img1_name, img2_name)
 
-            print("Processing:", img1_name, img2_name)
+        img1 = cv2.imread(f"images/{img1_name}")
+        img2 = cv2.imread(f"images/{img2_name}")
 
-            img1 = cv2.imread(f"images/{img1_name}")
-            img2 = cv2.imread(f"images/{img2_name}")
+        if img1 is None or img2 is None:
+            print("❌ IMAGE LOAD FAIL")
+            continue
 
-            if img1 is None or img2 is None:
-                continue
+        pts1, debug1 = detect_blue_pipe(img1)
+        pts2, debug2 = detect_blue_pipe(img2)
 
-            pts1, debug1 = detect_blue_pipe(img1)
-            pts2, debug2 = detect_blue_pipe(img2)
+        if pts1 is None or pts2 is None:
+            print("❌ DETECTION FAILED")
+            continue
 
-            if pts1 is None or pts2 is None:
-                print("❌ DETECTION FAILED")
-                continue
+        pos1, rot1 = get_camera_pose(geo, img1_name)
+        pos2, rot2 = get_camera_pose(geo, img2_name)
 
-            pos1, rot1 = get_camera_pose(geo, img1_name)
-            pos2, rot2 = get_camera_pose(geo, img2_name)
+        if pos1 is None or pos2 is None:
+            continue
 
-            if pos1 is None or pos2 is None:
-                continue
+        P1 = build_projection_matrix(pos1, rot1)
+        P2 = build_projection_matrix(pos2, rot2)
 
-            P1 = build_projection_matrix(pos1, rot1)
-            P2 = build_projection_matrix(pos2, rot2)
+        pts3d = triangulate_points(P1, P2, pts1, pts2)
 
-            pts3d = triangulate_points(P1, P2, pts1, pts2)
+        if len(pts3d) == 0:
+            print("❌ TRIANGULATION FAILED")
+            continue
 
-            if len(pts3d) == 0:
-                continue
+        print("✅ 3D:", pts3d)
 
-            print("✅ 3D POINT:", pts3d)
+        all_points.extend(pts3d)
 
-            all_points.extend(pts3d)
-
-        if len(all_points) == 0:
-            return {
-                "error": "no 3D points reconstructed",
-                "debug_image_1": debug1,
-                "debug_image_2": debug2
-            }
-
-        filtered = filter_points(all_points)
-
-        if len(filtered) == 0:
-            return {
-                "error": "no points after filtering",
-                "debug_image_1": debug1,
-                "debug_image_2": debug2
-            }
-
+    if len(all_points) == 0:
         return {
-            "points_3D": filtered,
-            "count": len(filtered),
+            "error": "no 3D points reconstructed",
             "debug_image_1": debug1,
             "debug_image_2": debug2
         }
 
-    except Exception as e:
-        print("GLOBAL ERROR:", str(e))
-        return {"error": str(e)}
+    filtered = filter_points(all_points)
+
+    return {
+        "points_3D": filtered,
+        "count": len(filtered),
+        "debug_image_1": debug1,
+        "debug_image_2": debug2
+    }
