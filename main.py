@@ -17,6 +17,36 @@ CX = IMAGE_WIDTH / 2
 CY = IMAGE_HEIGHT / 2
 
 # =========================
+# ROTATION (CRITIQUE)
+# =========================
+
+def euler_to_rotation(yaw, pitch, roll):
+
+    yaw = np.radians(yaw)
+    pitch = np.radians(pitch)
+    roll = np.radians(roll)
+
+    Rz = np.array([
+        [np.cos(yaw), -np.sin(yaw), 0],
+        [np.sin(yaw),  np.cos(yaw), 0],
+        [0, 0, 1]
+    ])
+
+    Ry = np.array([
+        [np.cos(pitch), 0, np.sin(pitch)],
+        [0, 1, 0],
+        [-np.sin(pitch), 0, np.cos(pitch)]
+    ])
+
+    Rx = np.array([
+        [1, 0, 0],
+        [0, np.cos(roll), -np.sin(roll)],
+        [0, np.sin(roll),  np.cos(roll)]
+    ])
+
+    return Rz @ Ry @ Rx
+
+# =========================
 # GEO (FORMAT TEXTE)
 # =========================
 
@@ -27,7 +57,7 @@ def load_geo():
         with open("geo.txt", "r") as f:
             lines = f.readlines()
 
-        for line in lines[1:]:  # skip header
+        for line in lines[1:]:
             parts = line.strip().split()
 
             if len(parts) < 7:
@@ -38,8 +68,7 @@ def load_geo():
             X, Y, Z = map(float, parts[1:4])
             yaw, pitch, roll = map(float, parts[4:7])
 
-            # ⚠️ rotation simplifiée (à améliorer plus tard)
-            R = np.eye(3)
+            R = euler_to_rotation(yaw, pitch, roll)
 
             data["observations"].append({
                 "image": name,
@@ -47,7 +76,7 @@ def load_geo():
                 "rotation": R.tolist()
             })
 
-        print(f"📍 GEO LOADED: {len(data['observations'])} entries")
+        print(f"📍 GEO LOADED: {len(data['observations'])}")
 
         return data
 
@@ -62,7 +91,6 @@ def get_camera_pose(geo, image_name):
 
     print(f"❌ GEO NOT FOUND: {image_name}")
     return None, None
-
 
 # =========================
 # PROJECTION
@@ -82,7 +110,6 @@ def build_projection_matrix(position, rotation):
     RT = np.hstack((R, t.reshape(3, 1)))
 
     return K @ RT
-
 
 # =========================
 # DETECTION BLEUE
@@ -139,7 +166,6 @@ def detect_blue_pipe(image):
         print("❌ detect_blue_pipe error:", e)
         return None
 
-
 # =========================
 # TRIANGULATION
 # =========================
@@ -162,7 +188,6 @@ def triangulate_points(P1, P2, pts1, pts2):
         print("❌ triangulation error:", e)
         return []
 
-
 # =========================
 # FILTRAGE
 # =========================
@@ -175,14 +200,13 @@ def filter_points(points):
         try:
             x, y, z = p
 
-            if 300 < z < 315:
+            if 295 < z < 320:  # élargi volontairement
                 filtered.append(p)
 
         except:
             continue
 
     return filtered
-
 
 # =========================
 # INTERPOLATION
@@ -211,7 +235,6 @@ def interpolate_polyline(points):
         result.append(p2.tolist())
 
     return result
-
 
 # =========================
 # API
