@@ -10,35 +10,32 @@ from segment_anything import sam_model_registry, SamPredictor
 app = FastAPI()
 
 # =========================
-# DOWNLOAD SAM (RAILWAY SAFE)
+# 📥 SAM DOWNLOAD (RAILWAY SAFE)
 # =========================
 
-SAM_CHECKPOINT = "/tmp/sam_vit_b_01ec64.pth"
-SAM_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+MODEL_PATH = "/tmp/sam_vit_b_01ec64.pth"
+MODEL_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
 
-def download_sam():
-    if not os.path.exists(SAM_CHECKPOINT):
-        print("📥 Downloading SAM model...")
-        urllib.request.urlretrieve(SAM_URL, SAM_CHECKPOINT)
-        print("✅ SAM downloaded")
-
-download_sam()
+if not os.path.exists(MODEL_PATH):
+    print("📥 Downloading SAM model...")
+    urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    print("✅ SAM model downloaded")
 
 # =========================
-# LOAD SAM
+# 🧠 LOAD SAM
 # =========================
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-sam = sam_model_registry["vit_b"](checkpoint=SAM_CHECKPOINT)
+sam = sam_model_registry["vit_b"](checkpoint=MODEL_PATH)
 sam.to(device=DEVICE)
 
 predictor = SamPredictor(sam)
 
-print("✅ SAM loaded on", DEVICE)
+print("✅ SAM READY on", DEVICE)
 
 # =========================
-# CAMERA PARAMS
+# 📷 CAMERA PARAMS
 # =========================
 
 FOCAL = 1000
@@ -46,11 +43,10 @@ CX = 640
 CY = 360
 
 # =========================
-# ROTATION
+# 🔄 ROTATION
 # =========================
 
 def euler_to_rotation(yaw, pitch, roll):
-
     yaw = np.radians(yaw)
     pitch = np.radians(pitch)
     roll = np.radians(roll)
@@ -76,11 +72,10 @@ def euler_to_rotation(yaw, pitch, roll):
     return Rz @ Ry @ Rx
 
 # =========================
-# GEO.TXT
+# 📄 GEO
 # =========================
 
 def load_geo():
-
     observations = []
 
     with open("geo.txt", "r") as f:
@@ -110,7 +105,6 @@ def load_geo():
 
 
 def get_pose(geo, name):
-
     for obs in geo:
         if obs["image"] == name:
             return obs["position"], obs["rotation"]
@@ -119,7 +113,7 @@ def get_pose(geo, name):
     return None, None
 
 # =========================
-# PROJECTION
+# 📐 PROJECTION
 # =========================
 
 def build_projection(position, rotation):
@@ -137,7 +131,7 @@ def build_projection(position, rotation):
     return K @ RT
 
 # =========================
-# SAM DETECTION
+# 🤖 DETECTION SAM
 # =========================
 
 def detect_pipe_sam(image):
@@ -146,7 +140,6 @@ def detect_pipe_sam(image):
 
     h, w = image.shape[:2]
 
-    # 🔥 point centre (on améliorera après)
     input_point = np.array([[w // 2, h // 2]])
     input_label = np.array([1])
 
@@ -159,7 +152,7 @@ def detect_pipe_sam(image):
     best_mask = masks[np.argmax(scores)]
     mask_uint8 = (best_mask * 255).astype(np.uint8)
 
-    # DEBUG IMAGE
+    # debug image
     _, buffer = cv2.imencode('.jpg', mask_uint8)
     debug_img = base64.b64encode(buffer).decode("utf-8")
 
@@ -177,7 +170,7 @@ def detect_pipe_sam(image):
     return [[cx, cy]], debug_img
 
 # =========================
-# TRIANGULATION
+# 🔺 TRIANGULATION
 # =========================
 
 def triangulate(P1, P2, pts1, pts2):
@@ -191,13 +184,16 @@ def triangulate(P1, P2, pts1, pts2):
     return pts3d.T.tolist()
 
 # =========================
-# API
+# 🌐 API
 # =========================
 
 @app.get("/reconstruct")
 def reconstruct():
 
     geo = load_geo()
+
+    if not os.path.exists("images"):
+        return {"error": "images folder missing"}
 
     images = sorted(os.listdir("images"))
 
