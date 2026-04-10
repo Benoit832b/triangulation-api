@@ -17,7 +17,7 @@ CX = IMAGE_WIDTH / 2
 CY = IMAGE_HEIGHT / 2
 
 # =========================
-# ROTATION (CRITIQUE)
+# ROTATION
 # =========================
 
 def euler_to_rotation(yaw, pitch, roll):
@@ -47,49 +47,47 @@ def euler_to_rotation(yaw, pitch, roll):
     return Rz @ Ry @ Rx
 
 # =========================
-# GEO (FORMAT TEXTE)
+# GEO
 # =========================
 
 def load_geo():
+
     data = {"observations": []}
 
-    try:
-        with open("geo.txt", "r") as f:
-            lines = f.readlines()
+    with open("geo.txt", "r") as f:
+        lines = f.readlines()
 
-        for line in lines[1:]:
-            parts = line.strip().split()
+    for line in lines[1:]:
+        parts = line.strip().split()
 
-            if len(parts) < 7:
-                continue
+        if len(parts) < 7:
+            continue
 
-            name = parts[0]
+        name = parts[0]
 
-            X, Y, Z = map(float, parts[1:4])
-            yaw, pitch, roll = map(float, parts[4:7])
+        X, Y, Z = map(float, parts[1:4])
+        yaw, pitch, roll = map(float, parts[4:7])
 
-            R = euler_to_rotation(yaw, pitch, roll)
+        R = euler_to_rotation(yaw, pitch, roll)
 
-            data["observations"].append({
-                "image": name,
-                "position": [X, Y, Z],
-                "rotation": R.tolist()
-            })
+        data["observations"].append({
+            "image": name,
+            "position": [X, Y, Z],
+            "rotation": R.tolist()
+        })
 
-        print(f"📍 GEO LOADED: {len(data['observations'])}")
+    print(f"GEO loaded: {len(data['observations'])}")
 
-        return data
-
-    except Exception as e:
-        raise Exception(f"geo.txt parsing error: {str(e)}")
+    return data
 
 
 def get_camera_pose(geo, image_name):
+
     for obs in geo["observations"]:
         if obs["image"] == image_name:
             return np.array(obs["position"]), np.array(obs["rotation"])
 
-    print(f"❌ GEO NOT FOUND: {image_name}")
+    print("GEO not found:", image_name)
     return None, None
 
 # =========================
@@ -112,7 +110,7 @@ def build_projection_matrix(position, rotation):
     return K @ RT
 
 # =========================
-# DETECTION BLEUE
+# DETECTION BLEU (1 POINT)
 # =========================
 
 def detect_blue_pipe(image):
@@ -125,45 +123,18 @@ def detect_blue_pipe(image):
 
         mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        moments = cv2.moments(mask)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        if not contours:
+        if moments["m00"] == 0:
             return None
 
-        cnt = max(contours, key=cv2.contourArea)
+        cx = int(moments["m10"] / moments["m00"])
+        cy = int(moments["m01"] / moments["m00"])
 
-        if cv2.contourArea(cnt) < 500:
-            return None
-
-        data_pts = cnt.reshape(-1, 2).astype(np.float32)
-
-        if len(data_pts) < 10:
-            return None
-
-        mean, eigenvectors = cv2.PCACompute(data_pts, mean=None)
-
-        center = mean[0]
-        direction = eigenvectors[0]
-
-        points = []
-
-        for t in np.linspace(-200, 200, 10):
-            pt = center + t * direction
-            x, y = int(pt[0]), int(pt[1])
-
-            if 0 <= x < IMAGE_WIDTH and 0 <= y < IMAGE_HEIGHT:
-                points.append([x, y])
-
-        if len(points) < 2:
-            return None
-
-        return points
+        return [[cx, cy]]  # 🔥 UN POINT
 
     except Exception as e:
-        print("❌ detect_blue_pipe error:", e)
+        print("detect error:", e)
         return None
 
 # =========================
@@ -176,7 +147,7 @@ def triangulate_points(P1, P2, pts1, pts2):
         pts1 = np.array(pts1).T.astype(np.float32)
         pts2 = np.array(pts2).T.astype(np.float32)
 
-        if pts1.shape[1] < 2:
+        if pts1.shape[1] < 1:
             return []
 
         points_4d = cv2.triangulatePoints(P1, P2, pts1, pts2)
@@ -185,7 +156,7 @@ def triangulate_points(P1, P2, pts1, pts2):
         return points_3d.T.tolist()
 
     except Exception as e:
-        print("❌ triangulation error:", e)
+        print("triangulation error:", e)
         return []
 
 # =========================
@@ -200,41 +171,13 @@ def filter_points(points):
         try:
             x, y, z = p
 
-            if 295 < z < 320:  # élargi volontairement
+            if 290 < z < 320:
                 filtered.append(p)
 
         except:
             continue
 
     return filtered
-
-# =========================
-# INTERPOLATION
-# =========================
-
-def interpolate_polyline(points):
-
-    if len(points) < 2:
-        return points
-
-    result = [points[0]]
-
-    for i in range(len(points) - 1):
-
-        p1 = np.array(points[i])
-        p2 = np.array(points[i + 1])
-
-        dist = np.linalg.norm(p2 - p1)
-
-        steps = max(1, int(dist / 0.1))
-
-        for s in range(1, steps):
-            pt = p1 + (p2 - p1) * (s / steps)
-            result.append(pt.tolist())
-
-        result.append(p2.tolist())
-
-    return result
 
 # =========================
 # API
@@ -255,7 +198,7 @@ def reconstruct():
         if len(image_files) < 2:
             return {"error": "not enough images"}
 
-        print(f"📸 {len(image_files)} images")
+        print("Images:", len(image_files))
 
         all_points = []
 
@@ -264,27 +207,25 @@ def reconstruct():
             img1_name = image_files[i]
             img2_name = image_files[i + 1]
 
-            print(f"➡️ {img1_name} / {img2_name}")
+            print("Processing:", img1_name, img2_name)
 
             img1 = cv2.imread(f"images/{img1_name}")
             img2 = cv2.imread(f"images/{img2_name}")
 
             if img1 is None or img2 is None:
-                print("❌ image read error")
                 continue
 
             pts1 = detect_blue_pipe(img1)
             pts2 = detect_blue_pipe(img2)
 
             if pts1 is None or pts2 is None:
-                print("❌ detection failed")
+                print("Detection failed")
                 continue
 
             pos1, rot1 = get_camera_pose(geo, img1_name)
             pos2, rot2 = get_camera_pose(geo, img2_name)
 
             if pos1 is None or pos2 is None:
-                print("❌ geo mismatch")
                 continue
 
             P1 = build_projection_matrix(pos1, rot1)
@@ -293,34 +234,23 @@ def reconstruct():
             pts3d = triangulate_points(P1, P2, pts1, pts2)
 
             if len(pts3d) == 0:
-                print("❌ triangulation failed")
                 continue
 
             all_points.extend(pts3d)
-
-        print(f"🔵 points bruts: {len(all_points)}")
 
         if len(all_points) == 0:
             return {"error": "no 3D points reconstructed"}
 
         filtered = filter_points(all_points)
 
-        print(f"🟢 points filtrés: {len(filtered)}")
-
         if len(filtered) == 0:
             return {"error": "no points after filtering"}
 
-        filtered.sort(key=lambda p: p[0])
-
-        dense = interpolate_polyline(filtered)
-
-        print(f"📏 points densifiés: {len(dense)}")
-
         return {
-            "points_3D": dense,
-            "count": len(dense)
+            "points_3D": filtered,
+            "count": len(filtered)
         }
 
     except Exception as e:
-        print("🔥 GLOBAL ERROR:", str(e))
+        print("GLOBAL ERROR:", str(e))
         return {"error": str(e)}
