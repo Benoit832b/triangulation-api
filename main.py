@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 from fastapi import FastAPI
-import json
 import os
 
 app = FastAPI()
@@ -18,23 +17,52 @@ CX = IMAGE_WIDTH / 2
 CY = IMAGE_HEIGHT / 2
 
 # =========================
-# GEO
+# GEO (FORMAT TEXTE)
 # =========================
 
 def load_geo():
+    data = {"observations": []}
+
     try:
         with open("geo.txt", "r") as f:
-            return json.load(f)
+            lines = f.readlines()
+
+        for line in lines[1:]:  # skip header
+            parts = line.strip().split()
+
+            if len(parts) < 7:
+                continue
+
+            name = parts[0]
+
+            X, Y, Z = map(float, parts[1:4])
+            yaw, pitch, roll = map(float, parts[4:7])
+
+            # ⚠️ rotation simplifiée (à améliorer plus tard)
+            R = np.eye(3)
+
+            data["observations"].append({
+                "image": name,
+                "position": [X, Y, Z],
+                "rotation": R.tolist()
+            })
+
+        print(f"📍 GEO LOADED: {len(data['observations'])} entries")
+
+        return data
+
     except Exception as e:
-        raise Exception(f"geo.txt error: {str(e)}")
+        raise Exception(f"geo.txt parsing error: {str(e)}")
+
 
 def get_camera_pose(geo, image_name):
-    for obs in geo.get("observations", []):
-        if obs.get("image") == image_name:
+    for obs in geo["observations"]:
+        if obs["image"] == image_name:
             return np.array(obs["position"]), np.array(obs["rotation"])
 
     print(f"❌ GEO NOT FOUND: {image_name}")
     return None, None
+
 
 # =========================
 # PROJECTION
@@ -55,8 +83,9 @@ def build_projection_matrix(position, rotation):
 
     return K @ RT
 
+
 # =========================
-# DÉTECTION BLEU
+# DETECTION BLEUE
 # =========================
 
 def detect_blue_pipe(image):
@@ -110,6 +139,7 @@ def detect_blue_pipe(image):
         print("❌ detect_blue_pipe error:", e)
         return None
 
+
 # =========================
 # TRIANGULATION
 # =========================
@@ -132,6 +162,7 @@ def triangulate_points(P1, P2, pts1, pts2):
         print("❌ triangulation error:", e)
         return []
 
+
 # =========================
 # FILTRAGE
 # =========================
@@ -151,6 +182,7 @@ def filter_points(points):
             continue
 
     return filtered
+
 
 # =========================
 # INTERPOLATION
@@ -180,6 +212,7 @@ def interpolate_polyline(points):
 
     return result
 
+
 # =========================
 # API
 # =========================
@@ -192,14 +225,14 @@ def reconstruct():
         geo = load_geo()
 
         if not os.path.exists("images"):
-            raise Exception("images folder not found")
+            return {"error": "images folder not found"}
 
         image_files = sorted(os.listdir("images"))
 
         if len(image_files) < 2:
-            raise Exception("not enough images")
+            return {"error": "not enough images"}
 
-        print(f"📸 {len(image_files)} images détectées")
+        print(f"📸 {len(image_files)} images")
 
         all_points = []
 
@@ -266,9 +299,5 @@ def reconstruct():
         }
 
     except Exception as e:
-
         print("🔥 GLOBAL ERROR:", str(e))
-
-        return {
-            "error": str(e)
-        }
+        return {"error": str(e)}
