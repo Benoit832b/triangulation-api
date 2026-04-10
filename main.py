@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI
 import os
+import base64
 
 app = FastAPI()
 
@@ -110,39 +111,39 @@ def build_projection_matrix(position, rotation):
     return K @ RT
 
 # =========================
-# DETECTION BLEU + DEBUG
+# DETECTION BLEU + DEBUG BASE64
 # =========================
 
-def detect_blue_pipe(image, debug_name="debug_mask.jpg"):
+def detect_blue_pipe(image):
 
     try:
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-        # 🔵 seuil ajustable
         lower_blue = np.array([85, 70, 70])
         upper_blue = np.array([140, 255, 255])
 
         mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
-        # 🔥 sauvegarde debug
-        cv2.imwrite(debug_name, mask)
+        # 🔥 conversion base64 pour debug
+        _, buffer = cv2.imencode('.jpg', mask)
+        debug_img = base64.b64encode(buffer).decode("utf-8")
 
         moments = cv2.moments(mask)
 
         if moments["m00"] == 0:
             print("❌ NO BLUE DETECTED")
-            return None
+            return None, debug_img
 
         cx = int(moments["m10"] / moments["m00"])
         cy = int(moments["m01"] / moments["m00"])
 
-        print(f"✅ DETECTED PIXEL: {cx}, {cy}")
+        print(f"✅ DETECTED: {cx}, {cy}")
 
-        return [[cx, cy]]
+        return [[cx, cy]], debug_img
 
     except Exception as e:
         print("detect error:", e)
-        return None
+        return None, None
 
 # =========================
 # TRIANGULATION
@@ -208,6 +209,8 @@ def reconstruct():
         print("Images:", len(image_files))
 
         all_points = []
+        debug1 = None
+        debug2 = None
 
         for i in range(len(image_files) - 1):
 
@@ -220,11 +223,10 @@ def reconstruct():
             img2 = cv2.imread(f"images/{img2_name}")
 
             if img1 is None or img2 is None:
-                print("❌ IMAGE READ ERROR")
                 continue
 
-            pts1 = detect_blue_pipe(img1, "debug_mask_1.jpg")
-            pts2 = detect_blue_pipe(img2, "debug_mask_2.jpg")
+            pts1, debug1 = detect_blue_pipe(img1)
+            pts2, debug2 = detect_blue_pipe(img2)
 
             if pts1 is None or pts2 is None:
                 print("❌ DETECTION FAILED")
@@ -234,7 +236,6 @@ def reconstruct():
             pos2, rot2 = get_camera_pose(geo, img2_name)
 
             if pos1 is None or pos2 is None:
-                print("❌ GEO ERROR")
                 continue
 
             P1 = build_projection_matrix(pos1, rot1)
@@ -243,24 +244,33 @@ def reconstruct():
             pts3d = triangulate_points(P1, P2, pts1, pts2)
 
             if len(pts3d) == 0:
-                print("❌ TRIANGULATION FAILED")
                 continue
 
-            print("✅ POINT 3D:", pts3d)
+            print("✅ 3D POINT:", pts3d)
 
             all_points.extend(pts3d)
 
         if len(all_points) == 0:
-            return {"error": "no 3D points reconstructed"}
+            return {
+                "error": "no 3D points reconstructed",
+                "debug_image_1": debug1,
+                "debug_image_2": debug2
+            }
 
         filtered = filter_points(all_points)
 
         if len(filtered) == 0:
-            return {"error": "no points after filtering"}
+            return {
+                "error": "no points after filtering",
+                "debug_image_1": debug1,
+                "debug_image_2": debug2
+            }
 
         return {
             "points_3D": filtered,
-            "count": len(filtered)
+            "count": len(filtered),
+            "debug_image_1": debug1,
+            "debug_image_2": debug2
         }
 
     except Exception as e:
