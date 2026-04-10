@@ -76,7 +76,7 @@ def load_geo():
             "rotation": R.tolist()
         })
 
-    print(f"GEO loaded: {len(data['observations'])}")
+    print("GEO loaded:", len(data["observations"]))
 
     return data
 
@@ -110,28 +110,35 @@ def build_projection_matrix(position, rotation):
     return K @ RT
 
 # =========================
-# DETECTION BLEU (1 POINT)
+# DETECTION BLEU + DEBUG
 # =========================
 
-def detect_blue_pipe(image):
+def detect_blue_pipe(image, debug_name="debug_mask.jpg"):
 
     try:
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
+        # 🔵 seuil ajustable
         lower_blue = np.array([85, 70, 70])
         upper_blue = np.array([140, 255, 255])
 
         mask = cv2.inRange(hsv, lower_blue, upper_blue)
 
+        # 🔥 sauvegarde debug
+        cv2.imwrite(debug_name, mask)
+
         moments = cv2.moments(mask)
 
         if moments["m00"] == 0:
+            print("❌ NO BLUE DETECTED")
             return None
 
         cx = int(moments["m10"] / moments["m00"])
         cy = int(moments["m01"] / moments["m00"])
 
-        return [[cx, cy]]  # 🔥 UN POINT
+        print(f"✅ DETECTED PIXEL: {cx}, {cy}")
+
+        return [[cx, cy]]
 
     except Exception as e:
         print("detect error:", e)
@@ -213,19 +220,21 @@ def reconstruct():
             img2 = cv2.imread(f"images/{img2_name}")
 
             if img1 is None or img2 is None:
+                print("❌ IMAGE READ ERROR")
                 continue
 
-            pts1 = detect_blue_pipe(img1)
-            pts2 = detect_blue_pipe(img2)
+            pts1 = detect_blue_pipe(img1, "debug_mask_1.jpg")
+            pts2 = detect_blue_pipe(img2, "debug_mask_2.jpg")
 
             if pts1 is None or pts2 is None:
-                print("Detection failed")
+                print("❌ DETECTION FAILED")
                 continue
 
             pos1, rot1 = get_camera_pose(geo, img1_name)
             pos2, rot2 = get_camera_pose(geo, img2_name)
 
             if pos1 is None or pos2 is None:
+                print("❌ GEO ERROR")
                 continue
 
             P1 = build_projection_matrix(pos1, rot1)
@@ -234,7 +243,10 @@ def reconstruct():
             pts3d = triangulate_points(P1, P2, pts1, pts2)
 
             if len(pts3d) == 0:
+                print("❌ TRIANGULATION FAILED")
                 continue
+
+            print("✅ POINT 3D:", pts3d)
 
             all_points.extend(pts3d)
 
