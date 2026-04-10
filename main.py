@@ -4,13 +4,14 @@ import os
 import base64
 import urllib.request
 import torch
+import time
 from fastapi import FastAPI
 from segment_anything import sam_model_registry, SamPredictor
 
 app = FastAPI()
 
 # =========================
-# 📥 SAM DOWNLOAD (RAILWAY SAFE)
+# 📥 SAM DOWNLOAD
 # =========================
 
 MODEL_PATH = "/tmp/sam_vit_b_01ec64.pth"
@@ -99,8 +100,6 @@ def load_geo():
             "rotation": R
         })
 
-    print(f"GEO loaded: {len(observations)} cameras")
-
     return observations
 
 
@@ -108,7 +107,6 @@ def get_pose(geo, name):
     for obs in geo:
         if obs["image"] == name:
             return obs["position"], obs["rotation"]
-
     return None, None
 
 # =========================
@@ -130,7 +128,7 @@ def build_projection(position, rotation):
     return K @ RT
 
 # =========================
-# 🤖 DETECTION SAM
+# 🤖 SAM DETECTION (ULTRA SIMPLE)
 # =========================
 
 def detect_pipe_sam(image):
@@ -145,27 +143,20 @@ def detect_pipe_sam(image):
     masks, scores, _ = predictor.predict(
         point_coords=input_point,
         point_labels=input_label,
-        multimask_output=True
+        multimask_output=False
     )
 
-    best_mask = masks[np.argmax(scores)]
-    mask_uint8 = (best_mask * 255).astype(np.uint8)
+    mask = (masks[0] * 255).astype(np.uint8)
 
-    # debug image
-    _, buffer = cv2.imencode('.jpg', mask_uint8)
-    debug_img = base64.b64encode(buffer).decode("utf-8")
-
-    moments = cv2.moments(mask_uint8)
+    moments = cv2.moments(mask)
 
     if moments["m00"] < 500:
-        return None, debug_img
+        return None
 
     cx = int(moments["m10"] / moments["m00"])
     cy = int(moments["m01"] / moments["m00"])
 
-    print(f"✅ SAM DETECTED: {cx}, {cy}")
-
-    return [[cx, cy]], debug_img
+    return [[cx, cy]]
 
 # =========================
 # 🔺 TRIANGULATION
@@ -188,66 +179,43 @@ def triangulate(P1, P2, pts1, pts2):
 @app.get("/reconstruct")
 def reconstruct():
 
-    geo = load_geo()
+    start_time = time.time()
 
-    if not os.path.exists("images"):
-        return {"error": "images folder missing"}
+    geo = load_geo()
 
     images = sorted(os.listdir("images"))
 
-    # 🔥 LIMITATION ANTI-TIMEOUT RAILWAY
-    images = images[:5]
-
+    # 🔥 ULTRA LIMITATION
     if len(images) < 2:
         return {"error": "not enough images"}
 
-    all_points = []
-    debug1 = None
-    debug2 = None
+    img1_name = images[0]
+    img2_name = images[1]
 
-    for i in range(len(images) - 1):
+    img1 = cv2.imread(f"images/{img1_name}")
+    img2 = cv2.imread(f"images/{img2_name}")
 
-        img1_name = images[i]
-        img2_name = images[i + 1]
+    pts1 = detect_pipe_sam(img1)
+    pts2 = detect_pipe_sam(img2)
 
-        print("Processing:", img1_name, img2_name)
+    if pts1 is None or pts2 is None:
+        return {"error": "SAM detection failed"}
 
-        img1 = cv2.imread(f"images/{img1_name}")
-        img2 = cv2.imread(f"images/{img2_name}")
+    pos1, rot1 = get_pose(geo, img1_name)
+    pos2, rot2 = get_pose(geo, img2_name)
 
-        if img1 is None or img2 is None:
-            continue
+    if pos1 is None or pos2 is None:
+        return {"error": "geo mismatch"}
 
-        pts1, debug1 = detect_pipe_sam(img1)
-        pts2, debug2 = detect_pipe_sam(img2)
+    P1 = build_projection(pos1, rot1)
+    P2 = build_projection(pos2, rot2)
 
-        if pts1 is None or pts2 is None:
-            continue
+    pts3d = triangulate(P1, P2, pts1, pts2)
 
-        pos1, rot1 = get_pose(geo, img1_name)
-        pos2, rot2 = get_pose(geo, img2_name)
-
-        if pos1 is None or pos2 is None:
-            continue
-
-        P1 = build_projection(pos1, rot1)
-        P2 = build_projection(pos2, rot2)
-
-        pts3d = triangulate(P1, P2, pts1, pts2)
-
-        if len(pts3d) > 0:
-            all_points.extend(pts3d)
-
-    if len(all_points) == 0:
-        return {
-            "error": "no 3D points reconstructed",
-            "debug_image_1": debug1,
-            "debug_image_2": debug2
-        }
+    duration = time.time() - start_time
 
     return {
-        "points_3D": all_points,
-        "count": len(all_points),
-        "debug_image_1": debug1,
-        "debug_image_2": debug2
+        "points_3D": pts3d,
+        "count": len(pts3d),
+        "processing_time_sec": duration
     }
