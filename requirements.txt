@@ -1,4 +1,7 @@
 fastapi
 uvicorn
-numpy
 opencv-python-headless
+numpy
+torch
+torchvision
+segment-anything
