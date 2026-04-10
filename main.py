@@ -109,7 +109,6 @@ def get_pose(geo, name):
         if obs["image"] == name:
             return obs["position"], obs["rotation"]
 
-    print("❌ GEO NOT FOUND:", name)
     return None, None
 
 # =========================
@@ -159,7 +158,6 @@ def detect_pipe_sam(image):
     moments = cv2.moments(mask_uint8)
 
     if moments["m00"] < 500:
-        print("❌ SAM: no detection")
         return None, debug_img
 
     cx = int(moments["m10"] / moments["m00"])
@@ -196,6 +194,9 @@ def reconstruct():
         return {"error": "images folder missing"}
 
     images = sorted(os.listdir("images"))
+
+    # 🔥 LIMITATION ANTI-TIMEOUT RAILWAY
+    images = images[:5]
 
     if len(images) < 2:
         return {"error": "not enough images"}
@@ -235,7 +236,6 @@ def reconstruct():
         pts3d = triangulate(P1, P2, pts1, pts2)
 
         if len(pts3d) > 0:
-            print("✅ 3D:", pts3d)
             all_points.extend(pts3d)
 
     if len(all_points) == 0:
