@@ -2,6 +2,6 @@ fastapi
 uvicorn
 opencv-python-headless
 numpy
-torch
+torch==2.0.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
 torchvision
 segment-anything
