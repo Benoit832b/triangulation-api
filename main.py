@@ -22,12 +22,15 @@ CY = IMAGE_HEIGHT / 2
 # =========================
 
 def load_geo():
-    with open("geo.txt", "r") as f:
-        return json.load(f)
+    try:
+        with open("geo.txt", "r") as f:
+            return json.load(f)
+    except Exception as e:
+        raise Exception(f"geo.txt error: {str(e)}")
 
 def get_camera_pose(geo, image_name):
-    for obs in geo["observations"]:
-        if obs["image"] == image_name:
+    for obs in geo.get("observations", []):
+        if obs.get("image") == image_name:
             return np.array(obs["position"]), np.array(obs["rotation"])
 
     print(f"❌ GEO NOT FOUND: {image_name}")
@@ -53,7 +56,7 @@ def build_projection_matrix(position, rotation):
     return K @ RT
 
 # =========================
-# DÉTECTION BLEU (ROBUSTE)
+# DÉTECTION BLEU
 # =========================
 
 def detect_blue_pipe(image):
@@ -108,7 +111,7 @@ def detect_blue_pipe(image):
         return None
 
 # =========================
-# TRIANGULATION SAFE
+# TRIANGULATION
 # =========================
 
 def triangulate_points(P1, P2, pts1, pts2):
@@ -123,7 +126,7 @@ def triangulate_points(P1, P2, pts1, pts2):
         points_4d = cv2.triangulatePoints(P1, P2, pts1, pts2)
         points_3d = points_4d[:3] / points_4d[3]
 
-        return points_3d.T
+        return points_3d.T.tolist()
 
     except Exception as e:
         print("❌ triangulation error:", e)
@@ -150,7 +153,7 @@ def filter_points(points):
     return filtered
 
 # =========================
-# INTERPOLATION 10cm
+# INTERPOLATION
 # =========================
 
 def interpolate_polyline(points):
@@ -178,72 +181,94 @@ def interpolate_polyline(points):
     return result
 
 # =========================
-# API RECONSTRUCTION
+# API
 # =========================
 
 @app.get("/reconstruct")
 def reconstruct():
 
-    geo = load_geo()
+    try:
 
-    image_files = sorted(os.listdir("images"))
+        geo = load_geo()
 
-    print(f"📸 {len(image_files)} images détectées")
+        if not os.path.exists("images"):
+            raise Exception("images folder not found")
 
-    all_points = []
+        image_files = sorted(os.listdir("images"))
 
-    for i in range(len(image_files) - 1):
+        if len(image_files) < 2:
+            raise Exception("not enough images")
 
-        img1_name = image_files[i]
-        img2_name = image_files[i + 1]
+        print(f"📸 {len(image_files)} images détectées")
 
-        print(f"➡️ Processing: {img1_name} / {img2_name}")
+        all_points = []
 
-        img1 = cv2.imread(f"images/{img1_name}")
-        img2 = cv2.imread(f"images/{img2_name}")
+        for i in range(len(image_files) - 1):
 
-        if img1 is None or img2 is None:
-            print("❌ image read error")
-            continue
+            img1_name = image_files[i]
+            img2_name = image_files[i + 1]
 
-        pts1 = detect_blue_pipe(img1)
-        pts2 = detect_blue_pipe(img2)
+            print(f"➡️ {img1_name} / {img2_name}")
 
-        if pts1 is None or pts2 is None:
-            print("❌ detection failed")
-            continue
+            img1 = cv2.imread(f"images/{img1_name}")
+            img2 = cv2.imread(f"images/{img2_name}")
 
-        pos1, rot1 = get_camera_pose(geo, img1_name)
-        pos2, rot2 = get_camera_pose(geo, img2_name)
+            if img1 is None or img2 is None:
+                print("❌ image read error")
+                continue
 
-        if pos1 is None or pos2 is None:
-            print("❌ geo mismatch")
-            continue
+            pts1 = detect_blue_pipe(img1)
+            pts2 = detect_blue_pipe(img2)
 
-        P1 = build_projection_matrix(pos1, rot1)
-        P2 = build_projection_matrix(pos2, rot2)
+            if pts1 is None or pts2 is None:
+                print("❌ detection failed")
+                continue
 
-        pts3d = triangulate_points(P1, P2, pts1, pts2)
+            pos1, rot1 = get_camera_pose(geo, img1_name)
+            pos2, rot2 = get_camera_pose(geo, img2_name)
 
-        if len(pts3d) == 0:
-            print("❌ triangulation failed")
-            continue
+            if pos1 is None or pos2 is None:
+                print("❌ geo mismatch")
+                continue
 
-        all_points.extend(pts3d.tolist())
+            P1 = build_projection_matrix(pos1, rot1)
+            P2 = build_projection_matrix(pos2, rot2)
 
-    print(f"🔵 Points bruts: {len(all_points)}")
+            pts3d = triangulate_points(P1, P2, pts1, pts2)
 
-    filtered = filter_points(all_points)
+            if len(pts3d) == 0:
+                print("❌ triangulation failed")
+                continue
 
-    print(f"🟢 Points filtrés: {len(filtered)}")
+            all_points.extend(pts3d)
 
-    filtered.sort(key=lambda p: p[0])
+        print(f"🔵 points bruts: {len(all_points)}")
 
-    dense = interpolate_polyline(filtered)
+        if len(all_points) == 0:
+            return {"error": "no 3D points reconstructed"}
 
-    print(f"📏 Points densifiés: {len(dense)}")
+        filtered = filter_points(all_points)
 
-    return {
-        "points_3D": dense,
-        "count": len(dense)
-    }
+        print(f"🟢 points filtrés: {len(filtered)}")
+
+        if len(filtered) == 0:
+            return {"error": "no points after filtering"}
+
+        filtered.sort(key=lambda p: p[0])
+
+        dense = interpolate_polyline(filtered)
+
+        print(f"📏 points densifiés: {len(dense)}")
+
+        return {
+            "points_3D": dense,
+            "count": len(dense)
+        }
+
+    except Exception as e:
+
+        print("🔥 GLOBAL ERROR:", str(e))
+
+        return {
+            "error": str(e)
+        }
