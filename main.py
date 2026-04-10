@@ -1,21 +1,49 @@
 import cv2
 import numpy as np
-from fastapi import FastAPI
 import os
 import base64
+import urllib.request
+import torch
+from fastapi import FastAPI
+from segment_anything import sam_model_registry, SamPredictor
 
 app = FastAPI()
 
 # =========================
-# PARAMÈTRES CAMÉRA
+# DOWNLOAD SAM (RAILWAY SAFE)
 # =========================
 
-IMAGE_WIDTH = 1280
-IMAGE_HEIGHT = 720
+SAM_CHECKPOINT = "/tmp/sam_vit_b_01ec64.pth"
+SAM_URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth"
+
+def download_sam():
+    if not os.path.exists(SAM_CHECKPOINT):
+        print("📥 Downloading SAM model...")
+        urllib.request.urlretrieve(SAM_URL, SAM_CHECKPOINT)
+        print("✅ SAM downloaded")
+
+download_sam()
+
+# =========================
+# LOAD SAM
+# =========================
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+sam = sam_model_registry["vit_b"](checkpoint=SAM_CHECKPOINT)
+sam.to(device=DEVICE)
+
+predictor = SamPredictor(sam)
+
+print("✅ SAM loaded on", DEVICE)
+
+# =========================
+# CAMERA PARAMS
+# =========================
 
 FOCAL = 1000
-CX = IMAGE_WIDTH / 2
-CY = IMAGE_HEIGHT / 2
+CX = 640
+CY = 360
 
 # =========================
 # ROTATION
@@ -53,7 +81,7 @@ def euler_to_rotation(yaw, pitch, roll):
 
 def load_geo():
 
-    data = {"observations": []}
+    observations = []
 
     with open("geo.txt", "r") as f:
         lines = f.readlines()
@@ -70,34 +98,33 @@ def load_geo():
 
         R = euler_to_rotation(yaw, pitch, roll)
 
-        data["observations"].append({
+        observations.append({
             "image": name,
             "position": np.array([X, Y, Z]),
             "rotation": R
         })
 
-    print(f"GEO loaded: {len(data['observations'])} cameras")
+    print(f"GEO loaded: {len(observations)} cameras")
 
-    return data
+    return observations
 
 
-def get_camera_pose(geo, image_name):
+def get_pose(geo, name):
 
-    for obs in geo["observations"]:
-        if obs["image"] == image_name:
+    for obs in geo:
+        if obs["image"] == name:
             return obs["position"], obs["rotation"]
 
-    print("❌ GEO NOT FOUND:", image_name)
+    print("❌ GEO NOT FOUND:", name)
     return None, None
 
 # =========================
 # PROJECTION
 # =========================
 
-def build_projection_matrix(position, rotation):
+def build_projection(position, rotation):
 
-    R = rotation
-    t = -R @ position
+    t = -rotation @ position
 
     K = np.array([
         [FOCAL, 0, CX],
@@ -105,43 +132,47 @@ def build_projection_matrix(position, rotation):
         [0, 0, 1]
     ])
 
-    RT = np.hstack((R, t.reshape(3, 1)))
+    RT = np.hstack((rotation, t.reshape(3, 1)))
 
     return K @ RT
 
 # =========================
-# DETECTION BLEU (ROBUSTE)
+# SAM DETECTION
 # =========================
 
-def detect_blue_pipe(image):
+def detect_pipe_sam(image):
 
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    predictor.set_image(image)
 
-    # 🔥 plage large (terrain)
-    lower_blue = np.array([70, 40, 40])
-    upper_blue = np.array([150, 255, 255])
+    h, w = image.shape[:2]
 
-    mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    # 🔥 point centre (on améliorera après)
+    input_point = np.array([[w // 2, h // 2]])
+    input_label = np.array([1])
 
-    # 🔥 nettoyage morphologique
-    kernel = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.dilate(mask, kernel, iterations=2)
+    masks, scores, _ = predictor.predict(
+        point_coords=input_point,
+        point_labels=input_label,
+        multimask_output=True
+    )
 
-    # debug base64
-    _, buffer = cv2.imencode('.jpg', mask)
+    best_mask = masks[np.argmax(scores)]
+    mask_uint8 = (best_mask * 255).astype(np.uint8)
+
+    # DEBUG IMAGE
+    _, buffer = cv2.imencode('.jpg', mask_uint8)
     debug_img = base64.b64encode(buffer).decode("utf-8")
 
-    moments = cv2.moments(mask)
+    moments = cv2.moments(mask_uint8)
 
     if moments["m00"] < 500:
-        print("❌ NO BLUE DETECTED")
+        print("❌ SAM: no detection")
         return None, debug_img
 
     cx = int(moments["m10"] / moments["m00"])
     cy = int(moments["m01"] / moments["m00"])
 
-    print(f"✅ BLUE DETECTED: {cx}, {cy}")
+    print(f"✅ SAM DETECTED: {cx}, {cy}")
 
     return [[cx, cy]], debug_img
 
@@ -149,36 +180,15 @@ def detect_blue_pipe(image):
 # TRIANGULATION
 # =========================
 
-def triangulate_points(P1, P2, pts1, pts2):
+def triangulate(P1, P2, pts1, pts2):
 
     pts1 = np.array(pts1).T.astype(np.float32)
     pts2 = np.array(pts2).T.astype(np.float32)
 
-    if pts1.shape[1] < 1:
-        return []
+    pts4d = cv2.triangulatePoints(P1, P2, pts1, pts2)
+    pts3d = pts4d[:3] / pts4d[3]
 
-    points_4d = cv2.triangulatePoints(P1, P2, pts1, pts2)
-    points_3d = points_4d[:3] / points_4d[3]
-
-    return points_3d.T.tolist()
-
-# =========================
-# FILTRE ALTITUDE
-# =========================
-
-def filter_points(points):
-
-    filtered = []
-
-    for p in points:
-        try:
-            x, y, z = p
-            if 0 < z < 1000:  # 🔥 large pour debug
-                filtered.append(p)
-        except:
-            continue
-
-    return filtered
+    return pts3d.T.tolist()
 
 # =========================
 # API
@@ -189,24 +199,19 @@ def reconstruct():
 
     geo = load_geo()
 
-    if not os.path.exists("images"):
-        return {"error": "images folder missing"}
+    images = sorted(os.listdir("images"))
 
-    image_files = sorted(os.listdir("images"))
-
-    if len(image_files) < 2:
+    if len(images) < 2:
         return {"error": "not enough images"}
-
-    print("Images found:", len(image_files))
 
     all_points = []
     debug1 = None
     debug2 = None
 
-    for i in range(len(image_files) - 1):
+    for i in range(len(images) - 1):
 
-        img1_name = image_files[i]
-        img2_name = image_files[i + 1]
+        img1_name = images[i]
+        img2_name = images[i + 1]
 
         print("Processing:", img1_name, img2_name)
 
@@ -214,34 +219,28 @@ def reconstruct():
         img2 = cv2.imread(f"images/{img2_name}")
 
         if img1 is None or img2 is None:
-            print("❌ IMAGE LOAD FAIL")
             continue
 
-        pts1, debug1 = detect_blue_pipe(img1)
-        pts2, debug2 = detect_blue_pipe(img2)
+        pts1, debug1 = detect_pipe_sam(img1)
+        pts2, debug2 = detect_pipe_sam(img2)
 
         if pts1 is None or pts2 is None:
-            print("❌ DETECTION FAILED")
             continue
 
-        pos1, rot1 = get_camera_pose(geo, img1_name)
-        pos2, rot2 = get_camera_pose(geo, img2_name)
+        pos1, rot1 = get_pose(geo, img1_name)
+        pos2, rot2 = get_pose(geo, img2_name)
 
         if pos1 is None or pos2 is None:
             continue
 
-        P1 = build_projection_matrix(pos1, rot1)
-        P2 = build_projection_matrix(pos2, rot2)
+        P1 = build_projection(pos1, rot1)
+        P2 = build_projection(pos2, rot2)
 
-        pts3d = triangulate_points(P1, P2, pts1, pts2)
+        pts3d = triangulate(P1, P2, pts1, pts2)
 
-        if len(pts3d) == 0:
-            print("❌ TRIANGULATION FAILED")
-            continue
-
-        print("✅ 3D:", pts3d)
-
-        all_points.extend(pts3d)
+        if len(pts3d) > 0:
+            print("✅ 3D:", pts3d)
+            all_points.extend(pts3d)
 
     if len(all_points) == 0:
         return {
@@ -250,11 +249,9 @@ def reconstruct():
             "debug_image_2": debug2
         }
 
-    filtered = filter_points(all_points)
-
     return {
-        "points_3D": filtered,
-        "count": len(filtered),
+        "points_3D": all_points,
+        "count": len(all_points),
         "debug_image_1": debug1,
         "debug_image_2": debug2
     }
